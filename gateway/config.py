@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     auth_service_url: str = "http://localhost:9001"
     chat_service_url: str = "http://localhost:9002"
     ai_service_url: str = "http://localhost:9003"
+    products_service_url: str = "http://localhost:9004"
 
     # ── HTTP client / pool settings ───────────────────────────────────────────
     # Max persistent connections per upstream host
@@ -47,6 +48,7 @@ class Settings(BaseSettings):
             "/auth": "auth",
             "/chat": "chat",
             "/ai": "ai",
+            "/products": "products",
         }
 
     @property
@@ -55,6 +57,7 @@ class Settings(BaseSettings):
             "auth": self.auth_service_url,
             "chat": self.chat_service_url,
             "ai": self.ai_service_url,
+            "products": self.products_service_url,
         }
 
 

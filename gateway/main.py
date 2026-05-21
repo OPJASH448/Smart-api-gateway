@@ -4,6 +4,7 @@ Entry point for the FastAPI gateway server.
 """
 
 import asyncio
+import json
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -18,6 +19,8 @@ from gateway.config import settings
 from gateway.router import GatewayRouter
 from gateway.connection_pool import ConnectionPoolManager
 from gateway.logger import GatewayLogger
+from gateway.redis_client import redis_client
+from gateway.load_balancer import LoadBalancer
 
 
 # ── Lifespan (startup / shutdown) ────────────────────────────────────────────
@@ -30,8 +33,10 @@ async def lifespan(app: FastAPI):
 
     app.state.router = GatewayRouter(settings)
     app.state.logger = GatewayLogger()
+    app.state.load_balancer = LoadBalancer(settings)
 
     print("✅ Gateway started — connection pools ready")
+    print("✅ Load balancer initialized — metrics tracking enabled")
     yield
 
     await app.state.pool_manager.shutdown()
@@ -91,6 +96,24 @@ async def list_routes(request: Request):
     return {"routes": router.describe()}
 
 
+@app.get("/gateway/metrics", tags=["Gateway"])
+async def get_metrics(request: Request):
+    """Return collected metrics and service health scores."""
+    load_balancer = request.app.state.load_balancer
+    metrics_collector = load_balancer.metrics
+    route_table = settings.route_table
+
+    services_health = {}
+    for prefix, service_name in route_table.items():
+        health = await metrics_collector.get_service_health(service_name)
+        services_health[service_name] = health
+
+    return {
+        "services": services_health,
+        "timestamp": int(time.time()),
+    }
+
+
 # ── Catch-all proxy ───────────────────────────────────────────────────────────
 
 @app.api_route(
@@ -100,14 +123,24 @@ async def list_routes(request: Request):
 )
 async def proxy(request: Request, full_path: str):
     """
-    Core reverse-proxy handler.
+    Core reverse-proxy handler with Redis caching.
 
-    Steps
+    CACHING FLOW
     -----
-    1. Resolve the upstream URL from the routing table.
-    2. Pick the right HTTP client from the connection pool.
-    3. Stream the response back to the caller.
-    4. Log the transaction.
+    Request
+      ↓
+    Check Redis (GET only)
+      ↓
+    CACHE HIT? → Return cached response
+      ↓
+    CACHE MISS → Forward to service
+      ↓
+    Store response in Redis (TTL: 60s)
+      ↓
+    Return response
+
+    Cache Key Format: {METHOD}:{PATH}
+    Example: GET:/products/1
     """
     router: GatewayRouter = request.app.state.router
     pool_manager: ConnectionPoolManager = request.app.state.pool_manager
@@ -125,7 +158,22 @@ async def proxy(request: Request, full_path: str):
             },
         )
 
-    # 2. Forward the request
+    # 2. Check Redis cache (only for GET requests)
+    cache_key = f"{request.method}:{request.url.path}"
+    if request.method == "GET":
+        try:
+            cached_response = await redis_client.get(cache_key)
+            if cached_response:
+                print(f"✅ CACHE HIT: {cache_key}")
+                return JSONResponse(
+                    status_code=200,
+                    content=json.loads(cached_response),
+                )
+        except Exception as e:
+            print(f"⚠️  Redis cache read error: {e}")
+            # Continue to upstream if cache fails
+
+    # 3. Forward the request
     try:
         client: httpx.AsyncClient = pool_manager.get_client(service_name)
 
@@ -166,7 +214,20 @@ async def proxy(request: Request, full_path: str):
             timeout=settings.request_timeout,
         )
 
-        # 3. Log
+        # 4. Cache the response (only for successful GET requests)
+        if request.method == "GET" and 200 <= upstream_response.status_code < 300:
+            try:
+                await redis_client.set(
+                    cache_key,
+                    upstream_response.text,
+                    ex=60,
+                )
+                print(f"💾 CACHE MISS: {cache_key} → Stored with 60s TTL")
+            except Exception as e:
+                print(f"⚠️  Redis cache write error: {e}")
+                # Continue even if cache write fails
+
+        # 5. Log and record metrics
         elapsed_ms = (time.monotonic() - request.state.start_time) * 1000
         await logger.log(
             request_id=request.state.request_id,
@@ -178,7 +239,20 @@ async def proxy(request: Request, full_path: str):
             latency_ms=elapsed_ms,
         )
 
-        # 4. Return upstream response (strip hop-by-hop response headers too)
+        # Record metrics for load balancing
+        load_balancer = request.app.state.load_balancer
+        task_type = request.url.path.split("/")[1]  # Extract from path (e.g., "products" from "/products/1")
+        await load_balancer.record_request(
+            service=service_name,
+            task_type=task_type,
+            latency_ms=elapsed_ms,
+            status_code=upstream_response.status_code,
+            complexity="low",  # Can be enhanced to detect from request
+            inflight_requests=1,  # Can be enhanced with queue depth
+        )
+        print(f"📊 Metrics recorded: {service_name} ({task_type}): {elapsed_ms:.0f}ms, status={upstream_response.status_code}")
+
+        # 6. Return upstream response (strip hop-by-hop response headers too)
         excluded_response_headers = {"transfer-encoding", "connection"}
         response_headers = {
             k: v
