@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # Each service can be overridden via environment variable, e.g.
     #   AUTH_SERVICE_URL=http://my-auth:9001
     auth_service_url: str = "http://localhost:9001"
+    user_service_url: str = "http://localhost:8001"
     chat_service_url: str = "http://localhost:9002"
     ai_service_url: str = "http://localhost:9003"
 
@@ -38,6 +39,19 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     environment: str = "development"
 
+    # ── Database & Redis ──────────────────────────────────────────────────────
+    database_url: str = "mongodb://localhost:27017/smart-api-gateway"
+    redis_url: str = "redis://localhost:6379/0"
+
+    # ── Security ──────────────────────────────────────────────────────────────
+    secret_key: str = "super-secret-gateway-key-change-me-in-production"
+    jwt_algorithm: str = "HS256"
+    public_prefixes: list[str] = ["/auth/login", "/health", "/gateway"]
+
+    # ── Rate Limiting ─────────────────────────────────────────────────────────
+    rate_limit_requests: int = 10
+    rate_limit_window: int = 60  # seconds
+
     # ── Route table ───────────────────────────────────────────────────────────
     # Prefix → service name.  The service name is used to look up the URL
     # above and to select the right connection-pool client.
@@ -45,6 +59,7 @@ class Settings(BaseSettings):
     def route_table(self) -> Dict[str, str]:
         return {
             "/auth": "auth",
+            "/users": "user",
             "/chat": "chat",
             "/ai": "ai",
         }
@@ -53,6 +68,7 @@ class Settings(BaseSettings):
     def service_urls(self) -> Dict[str, str]:
         return {
             "auth": self.auth_service_url,
+            "user": self.user_service_url,
             "chat": self.chat_service_url,
             "ai": self.ai_service_url,
         }

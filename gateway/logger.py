@@ -1,3 +1,4 @@
+
 """
 GatewayLogger — structured, async-friendly request logger.
 
