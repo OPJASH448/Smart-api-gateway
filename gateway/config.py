@@ -39,6 +39,22 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     environment: str = "development"
 
+    # ── Rate Limiting ─────────────────────────────────────────────────────────
+    # Algorithm: "token_bucket" or "sliding_window"
+    rate_limiter_enabled: bool = True
+    rate_limiter_algorithm: str = "token_bucket"
+    # Requests per minute (converted to per window in rate limiter)
+    rate_limiter_rate: int = 100
+    # Max burst capacity (for token bucket)
+    rate_limiter_capacity: int = 100
+    # Window size in seconds
+    rate_limiter_window_seconds: int = 60
+    # Identifiers to exclude from rate limiting (e.g., ["127.0.0.1"])
+    rate_limiter_whitelist: list = []
+
+    # ── Redis ─────────────────────────────────────────────────────────────────
+    redis_url: str = "redis://localhost:6379"
+
     # ── Route table ───────────────────────────────────────────────────────────
     # Prefix → service name.  The service name is used to look up the URL
     # above and to select the right connection-pool client.

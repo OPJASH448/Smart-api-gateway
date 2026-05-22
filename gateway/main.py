@@ -21,6 +21,7 @@ from gateway.connection_pool import ConnectionPoolManager
 from gateway.logger import GatewayLogger
 from gateway.redis_client import redis_client
 from gateway.load_balancer import LoadBalancer
+from gateway.rate_limiter import RateLimiterManager
 
 
 # ── Lifespan (startup / shutdown) ────────────────────────────────────────────
@@ -34,6 +35,19 @@ async def lifespan(app: FastAPI):
     app.state.router = GatewayRouter(settings)
     app.state.logger = GatewayLogger()
     app.state.load_balancer = LoadBalancer(settings)
+
+    # Initialize rate limiter
+    if settings.rate_limiter_enabled:
+        app.state.rate_limiter = RateLimiterManager(
+            algorithm=settings.rate_limiter_algorithm,
+            rate=settings.rate_limiter_rate,
+            capacity=settings.rate_limiter_capacity,
+            window_seconds=settings.rate_limiter_window_seconds,
+        )
+        print("✅ Rate limiter initialized — protecting against abuse")
+    else:
+        app.state.rate_limiter = None
+        print("⚠️  Rate limiter disabled")
 
     print("✅ Gateway started — connection pools ready")
     print("✅ Load balancer initialized — metrics tracking enabled")
@@ -58,6 +72,61 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Middleware: rate limiting ─────────────────────────────────────────────────
+
+@app.middleware("http")
+async def rate_limiting_middleware(request: Request, call_next):
+    """
+    Apply rate limiting per IP address.
+    Returns 429 Too Many Requests if limit exceeded.
+    Adds rate limit headers to all responses for observability.
+    """
+    rate_limiter: RateLimiterManager = request.app.state.rate_limiter
+    client_ip = request.client.host if request.client else "unknown"
+    state = {}
+    
+    # Determine if we should skip rate limiting for this path
+    skip_rate_limit = request.url.path in ["/health", "/gateway/routes", "/gateway/metrics", "/gateway/ratelimit"]
+    
+    # Check rate limit only if enabled and not skipped
+    if rate_limiter and settings.rate_limiter_enabled and not skip_rate_limit:
+        # Check whitelist
+        if client_ip not in settings.rate_limiter_whitelist:
+            # Check rate limit
+            allowed, state = await rate_limiter.check_limit(client_ip)
+            
+            if not allowed:
+                print(
+                    f"🚫 Rate limit exceeded for {client_ip}: "
+                    f"{state.get('requests_made', 'N/A')}/{state.get('limit', 'N/A')} "
+                    f"in {state.get('window_seconds', 'N/A')}s"
+                )
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "rate_limit_exceeded",
+                        "message": f"Too many requests. Limit: {settings.rate_limiter_rate} requests per {settings.rate_limiter_window_seconds} seconds",
+                        "retry_after": settings.rate_limiter_window_seconds,
+                        "client_ip": client_ip,
+                    },
+                )
+    
+    # Get rate limit state for headers (even for skipped endpoints)
+    if not state and rate_limiter and settings.rate_limiter_enabled:
+        _, state = await rate_limiter.check_limit(client_ip)
+    
+    # Process the request
+    response = await call_next(request)
+    
+    # Add rate limit headers to all responses for observability
+    if rate_limiter and settings.rate_limiter_enabled:
+        response.headers["x-ratelimit-limit"] = str(settings.rate_limiter_rate)
+        response.headers["x-ratelimit-remaining"] = str(max(0, state.get("tokens_remaining", state.get("requests_made", 0))))
+        response.headers["x-ratelimit-reset"] = str(int(time.time()) + settings.rate_limiter_window_seconds)
+    
+    return response
 
 
 # ── Middleware: request tracing ───────────────────────────────────────────────
@@ -86,7 +155,7 @@ async def request_tracing_middleware(request: Request, call_next):
 
 @app.get("/health", tags=["Gateway"])
 async def health_check():
-    return {"status": "ok", "service": "smart-api-gateway", "phase": 1}
+    return {"status": "ok", "service": "smart-api-gateway", "phase": 3}
 
 
 @app.get("/gateway/routes", tags=["Gateway"])
@@ -111,6 +180,35 @@ async def get_metrics(request: Request):
     return {
         "services": services_health,
         "timestamp": int(time.time()),
+    }
+
+
+@app.get("/gateway/ratelimit", tags=["Gateway"])
+async def get_ratelimit_info(request: Request):
+    """Return rate limiting configuration and status."""
+    if not settings.rate_limiter_enabled:
+        return {
+            "enabled": False,
+            "message": "Rate limiting is disabled",
+        }
+
+    client_ip = request.client.host if request.client else "unknown"
+    rate_limiter = request.app.state.rate_limiter
+
+    # Check current status for this IP
+    _, state = await rate_limiter.check_limit(client_ip)
+
+    return {
+        "enabled": True,
+        "algorithm": settings.rate_limiter_algorithm,
+        "rate": f"{settings.rate_limiter_rate} requests per {settings.rate_limiter_window_seconds} seconds",
+        "capacity": settings.rate_limiter_capacity,
+        "window_seconds": settings.rate_limiter_window_seconds,
+        "whitelist": settings.rate_limiter_whitelist,
+        "current_client": {
+            "ip": client_ip,
+            "status": state,
+        },
     }
 
 
