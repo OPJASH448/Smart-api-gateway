@@ -1,29 +1,27 @@
-from sqlalchemy import create_engine
+﻿from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 import os
+import redis.asyncio as redis
+from motor.motor_asyncio import AsyncIOMotorClient
+from gateway.config import settings
 
-# Get database URL from environment or use default
+# --- SQL Database (Postgres) ---
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://gateway:gateway_password@localhost:5432/gateway_logs"
 )
 
-# Create engine with connection pool
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,  # Test connections before using
+    pool_pre_ping=True,
     pool_size=10,
     max_overflow=20
 )
 
-# Create session factory
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Base for declarative models
 Base = declarative_base()
 
 def get_db():
-    """Dependency for FastAPI to get database session."""
     db = SessionLocal()
     try:
         yield db
@@ -31,5 +29,36 @@ def get_db():
         db.close()
 
 def init_db():
-    """Initialize database (create tables if not exist)."""
     Base.metadata.create_all(bind=engine)
+
+# --- NoSQL & Cache (MongoDB & Redis) ---
+class DatabaseManager:
+    def __init__(self):
+        self.client = AsyncIOMotorClient(
+            settings.database_url,
+            serverSelectionTimeoutMS=5000
+        )
+        self.db = self.client.get_default_database()
+        self.redis = None
+
+    async def connect(self):
+        try:
+            await self.client.admin.command('ping')
+            print("✅ MongoDB connected")
+        except Exception as e:
+            print(f"⚠️  Database connection failed (MongoDB): {e}")
+        
+        try:
+            self.redis = redis.from_url(settings.redis_url, decode_responses=True)
+            await self.redis.ping()
+            print("✅ Redis connected")
+        except Exception as e:
+            print(f"⚠️  Redis connection failed: {e}")
+
+    async def disconnect(self):
+        if self.redis:
+            await self.redis.close()
+        self.client.close()
+        print("🛑 Database & Redis disconnected")
+
+db_manager = DatabaseManager()

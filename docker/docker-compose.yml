@@ -19,14 +19,18 @@ services:
       - "8000:8000"
     environment:
       - AUTH_SERVICE_URL=http://auth:9001
+      - USER_SERVICE_URL=http://user-service:8001
       - CHAT_SERVICE_URL=http://chat:9002
       - AI_SERVICE_URL=http://ai:9003
-      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=mongodb://host.docker.internal:27017/smart-api-gateway
+      - REDIS_URL=redis://redis:6379/0
       - ENVIRONMENT=development
     depends_on:
       redis:
         condition: service_healthy
       auth:
+        condition: service_started
+      user-service:
         condition: service_started
       chat:
         condition: service_started
@@ -44,6 +48,14 @@ services:
     ports:
       - "9001:9001"
 
+  user-service:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: python -m services.user_service.main
+    ports:
+      - "8001:8001"
+
   chat:
     build:
       context: ..
@@ -59,3 +71,7 @@ services:
     command: python -m services.ai_service.main
     ports:
       - "9003:9003"
+    environment:
+      - REDIS_URL=redis://redis:6379
+
+

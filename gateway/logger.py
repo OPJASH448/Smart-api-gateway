@@ -1,3 +1,4 @@
+
 """
 GatewayLogger — structured, async-friendly request logger.
 
@@ -16,6 +17,8 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Optional
 
+
+from gateway.database import db_manager
 
 # Configure Python's root logger to output clean lines
 logging.basicConfig(
@@ -61,6 +64,11 @@ class GatewayLogger:
         async with self._lock:
             self._buffer.append(entry)
 
+        # 3. MongoDB persistence (Day 7)
+        if db_manager.db is not None:
+            # Motor methods return awaitables that should be awaited
+            await db_manager.db.logs.insert_one(entry.copy())
+
         # Emoji-prefixed status for human-readable console output
         icon = "✅" if status < 400 else ("⚠️ " if status < 500 else "❌")
         log.info(
@@ -95,3 +103,11 @@ class GatewayLogger:
             "avg_latency_ms": round(avg_latency, 2),
             "by_service": by_service,
         }
+
+    async def get_persisted_logs(self, limit: int = 100) -> list[dict]:
+        """Fetch the most recent logs from MongoDB."""
+        if db_manager.db is None:
+            return self.recent(limit)
+        
+        cursor = db_manager.db.logs.find({}, {"_id": 0}).sort("ts", -1).limit(limit)
+        return await cursor.to_list(length=limit)

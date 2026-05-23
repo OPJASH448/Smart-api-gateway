@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     # Each service can be overridden via environment variable, e.g.
     #   AUTH_SERVICE_URL=http://my-auth:9001
     auth_service_url: str = "http://localhost:9001"
+    user_service_url: str = "http://localhost:8001"
     chat_service_url: str = "http://localhost:9002"
     ai_service_url: str = "http://localhost:9003"
     products_service_url: str = "http://localhost:9004"
@@ -39,6 +40,26 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     environment: str = "development"
 
+    # ── Database & Redis ──────────────────────────────────────────────────────
+    database_url: str = "mongodb://localhost:27017/smart-api-gateway"
+    redis_url: str = "redis://localhost:6379/0"
+
+    # ── Security ──────────────────────────────────────────────────────────────
+    secret_key: str = "super-secret-gateway-key-change-me-in-production"
+    jwt_algorithm: str = "HS256"
+    public_prefixes: list[str] = ["/auth/login", "/health", "/gateway", "/dashboard"]
+
+    # ── Reliability (Day 6) ──────────────────────────────────────────────────
+    max_retries: int = 3
+    retry_backoff_factor: float = 1.0
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_recovery_timeout: int = 30 # seconds
+
+    # ── Caching (Day 4) ──────────────────────────────────────────────────────
+    cache_enabled: bool = True
+    cache_ttl: int = 300
+    cacheable_methods: list[str] = ["GET"]
+
     # ── Rate Limiting ─────────────────────────────────────────────────────────
     # Algorithm: "token_bucket" or "sliding_window"
     rate_limiter_enabled: bool = True
@@ -52,8 +73,6 @@ class Settings(BaseSettings):
     # Identifiers to exclude from rate limiting (e.g., ["127.0.0.1"])
     rate_limiter_whitelist: list = []
 
-    # ── Redis ─────────────────────────────────────────────────────────────────
-    redis_url: str = "redis://localhost:6379"
 
     # ── Route table ───────────────────────────────────────────────────────────
     # Prefix → service name.  The service name is used to look up the URL
@@ -62,6 +81,7 @@ class Settings(BaseSettings):
     def route_table(self) -> Dict[str, str]:
         return {
             "/auth": "auth",
+            "/users": "user",
             "/chat": "chat",
             "/ai": "ai",
             "/products": "products",
@@ -71,6 +91,7 @@ class Settings(BaseSettings):
     def service_urls(self) -> Dict[str, str]:
         return {
             "auth": self.auth_service_url,
+            "user": self.user_service_url,
             "chat": self.chat_service_url,
             "ai": self.ai_service_url,
             "products": self.products_service_url,
