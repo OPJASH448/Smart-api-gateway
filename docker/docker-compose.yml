@@ -1,61 +1,172 @@
 version: "3.9"
 
 services:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Redis - Cache & Rate Limiting State
+  # ────────────────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
+    container_name: smart-gateway-redis
     ports:
       - "6379:6379"
+    environment:
+      - REDIS_MAX_MEMORY=256mb
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
-
-  gateway:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    ports:
-      - "8000:8000"
-    environment:
-      - AUTH_SERVICE_URL=http://auth:9001
-      - CHAT_SERVICE_URL=http://chat:9002
-      - AI_SERVICE_URL=http://ai:9003
-      - REDIS_URL=redis://redis:6379
-      - ENVIRONMENT=development
-    depends_on:
-      redis:
-        condition: service_healthy
-      auth:
-        condition: service_started
-      chat:
-        condition: service_started
-      ai:
-        condition: service_started
+    networks:
+      - gateway-network
     volumes:
-      - ..:/app
-    command: uvicorn gateway.main:app --host 0.0.0.0 --port 8000 --reload
+      - redis_data:/data
 
+  # ────────────────────────────────────────────────────────────────────────────
+  # PostgreSQL - Request Logging & Database
+  # ────────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: smart-gateway-postgres
+    environment:
+      POSTGRES_DB: gateway_logs
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway_password
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - gateway-network
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../init-db.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Auth Service - Port 9001
+  # ────────────────────────────────────────────────────────────────────────────
   auth:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    container_name: smart-gateway-auth
     command: python -m services.auth_service.main
     ports:
       - "9001:9001"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - gateway-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001/auth/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
+  # ────────────────────────────────────────────────────────────────────────────
+  # Chat Service - Port 9002
+  # ────────────────────────────────────────────────────────────────────────────
   chat:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    container_name: smart-gateway-chat
     command: python -m services.chat_service.main
     ports:
       - "9002:9002"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - gateway-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9002/chat/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
+  # ────────────────────────────────────────────────────────────────────────────
+  # AI Service - Port 9003
+  # ────────────────────────────────────────────────────────────────────────────
   ai:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    container_name: smart-gateway-ai
     command: python -m services.ai_service.main
     ports:
       - "9003:9003"
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - gateway-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9003/ai/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # API Gateway - Port 8000 (Main Entry Point)
+  # ────────────────────────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: smart-gateway-main
+    command: uvicorn gateway.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      # Service URLs (use container names for internal communication)
+      - AUTH_SERVICE_URL=http://auth:9001
+      - CHAT_SERVICE_URL=http://chat:9002
+      - AI_SERVICE_URL=http://ai:9003
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://gateway:gateway_password@postgres:5432/gateway_logs
+      - ENVIRONMENT=development
+      - LOG_LEVEL=INFO
+      - PYTHONUNBUFFERED=1
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      chat:
+        condition: service_healthy
+      ai:
+        condition: service_healthy
+    networks:
+      - gateway-network
+    volumes:
+      - ..:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+# ────────────────────────────────────────────────────────────────────────────
+# Network - All services communicate via this internal network
+# ────────────────────────────────────────────────────────────────────────────
+networks:
+  gateway-network:
+    driver: bridge
+
+# ────────────────────────────────────────────────────────────────────────────
+# Volumes - Data persistence
+# ────────────────────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
