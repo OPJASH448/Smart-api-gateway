@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: smart-api-gateway
+    runtime: docker
+    plan: standard
+    preDeployCommand: ""
+    dockerfilePath: docker/Dockerfile
+    dockerContext: .
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn gateway.main:app --host 0.0.0.0 --port 8000"
+    healthCheckPath: /health
+    healthCheckInterval: 30
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: DATABASE_URL
+        scope: build,runtime
+        sync: false
+      - key: REDIS_URL
+        scope: build,runtime
+        sync: false
+      - key: GEMINI_API_KEY
+        scope: build,runtime
+        sync: false
