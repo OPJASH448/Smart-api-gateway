@@ -87,6 +87,14 @@ class MetricsCollector:
             print(f"⚠️  Error retrieving metrics for {service}: {e}")
             return None
 
+    async def get_all_metrics(self, services: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """Retrieve stored metrics for multiple services."""
+        results: Dict[str, List[Dict[str, Any]]] = {}
+        for service in services:
+            metrics = await self.get_metrics(service)
+            results[service] = metrics or []
+        return results
+
     async def get_service_health(self, service: str) -> Dict[str, Any]:
         """
         Compute health metrics for a service.

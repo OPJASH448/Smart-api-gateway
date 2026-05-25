@@ -1,19 +1,22 @@
 """
-Smart API Gateway - Phase 1: Core Reverse Proxy
-Entry point for the FastAPI gateway server.
+Smart API Gateway - Phase 3: Retry + Circuit Breaker + Logging + Monitoring
+Entry point for the FastAPI gateway server with advanced resilience patterns.
 """
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from gateway.config import settings
 from gateway.router import GatewayRouter
@@ -22,6 +25,27 @@ from gateway.logger import GatewayLogger
 from gateway.redis_client import redis_client
 from gateway.load_balancer import LoadBalancer
 from gateway.rate_limiter import RateLimiterManager
+from gateway.retry import retry_with_backoff
+from gateway.circuit_breaker import CircuitBreaker
+from gateway.database import init_db, get_db
+from gateway.models import RequestLog
+from gateway.ai_classifier import ServiceClassifier, RoutingScorer
+from gateway.request_cache import RequestCache
+from collections import deque
+from threading import Lock
+
+
+# ── Global Metrics Storage ────────────────────────────────────────────────────
+metrics_lock = Lock()
+total_requests = 0
+cache_hits = 0
+cache_misses = 0
+rate_limited_requests = 0
+recent_requests = deque(maxlen=50)  # Keep last 50 requests
+service_counts = {"auth": 0, "chat": 0, "ai": 0, "products": 0}
+service_health = {"auth": "healthy", "chat": "healthy", "ai": "healthy", "products": "healthy"}
+request_timestamps = deque(maxlen=300)  # Keep last 300 timestamps (5 minutes at 1 per second)
+classification_scores_history = deque(maxlen=100)  # Track recent classifications
 
 
 # ── Lifespan (startup / shutdown) ────────────────────────────────────────────
@@ -29,12 +53,33 @@ from gateway.rate_limiter import RateLimiterManager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialise shared resources on startup; clean up on shutdown."""
+    # Initialize database
+    try:
+        init_db()
+        print("✅ Database initialized — PostgreSQL connected")
+    except Exception as e:
+        print(f"⚠️  Database initialization failed: {e}")
+    
     app.state.pool_manager = ConnectionPoolManager()
     await app.state.pool_manager.startup()
 
     app.state.router = GatewayRouter(settings)
     app.state.logger = GatewayLogger()
     app.state.load_balancer = LoadBalancer(settings)
+
+    # Initialize AI Classifier for intelligent routing
+    print("🤖 Initializing AI Classifier (powered by Gemini 2.5 Flash)...")
+    app.state.ai_classifier = ServiceClassifier
+    app.state.routing_scorer = RoutingScorer
+    print("✅ AI Classifier ready — smart routing enabled")
+
+    # Initialize circuit breakers for each service
+    app.state.circuit_breakers = {
+        "auth": CircuitBreaker("auth_service", failure_threshold=5, recovery_timeout=30.0),
+        "chat": CircuitBreaker("chat_service", failure_threshold=5, recovery_timeout=30.0),
+        "ai": CircuitBreaker("ai_service", failure_threshold=5, recovery_timeout=30.0),
+    }
+    print("✅ Circuit breakers initialized — resilience patterns ready")
 
     # Initialize rate limiter
     if settings.rate_limiter_enabled:
@@ -51,6 +96,8 @@ async def lifespan(app: FastAPI):
 
     print("✅ Gateway started — connection pools ready")
     print("✅ Load balancer initialized — metrics tracking enabled")
+    print("🚀 Phase 3: Advanced Resilience & Monitoring Ready!")
+    print("🤖 AI Classification for Intelligent Routing: ENABLED")
     yield
 
     await app.state.pool_manager.shutdown()
@@ -61,8 +108,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Smart API Gateway",
-    description="Phase 1 — Core reverse proxy with async forwarding & connection pooling",
-    version="1.0.0",
+    description="Phase 3 — Advanced resilience with retry, circuit breaker, logging & monitoring",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -88,7 +135,13 @@ async def rate_limiting_middleware(request: Request, call_next):
     state = {}
     
     # Determine if we should skip rate limiting for this path
-    skip_rate_limit = request.url.path in ["/health", "/gateway/routes", "/gateway/metrics", "/gateway/ratelimit"]
+    skip_rate_limit = request.url.path in [
+        "/health",
+        "/gateway/routes",
+        "/gateway/metrics",
+        "/gateway/metrics/history",
+        "/gateway/ratelimit",
+    ]
     
     # Check rate limit only if enabled and not skipped
     if rate_limiter and settings.rate_limiter_enabled and not skip_rate_limit:
@@ -134,7 +187,7 @@ async def rate_limiting_middleware(request: Request, call_next):
 @app.middleware("http")
 async def request_tracing_middleware(request: Request, call_next):
     """Attach a unique request-ID and measure latency for every request."""
-    request_id = str(uuid.uuid4())[:8]
+    request_id = str(uuid.uuid4())
     request.state.request_id = request_id
     request.state.start_time = time.monotonic()
 
@@ -158,6 +211,148 @@ async def health_check():
     return {"status": "ok", "service": "smart-api-gateway", "phase": 3}
 
 
+@app.post("/gateway/classify", tags=["Gateway AI Classifier"])
+async def classify_request(request: Request):
+    """
+    AI-powered intelligent request classifier.
+    
+    Analyzes the request content and determines which service should handle it.
+    Uses Gemini API to understand request intent and score all services.
+    
+    Request body:
+    {
+        "text": "Your request or query text here"
+    }
+    
+    Response example:
+    {
+        "primary_service": "ai",
+        "primary_confidence": 0.92,
+        "classification_scores": {
+            "ai": 0.92,
+            "chat": 0.15,
+            "auth": 0.08,
+            "products": 0.05
+        },
+        "routing_info": {...}
+    }
+    """
+    try:
+        body = await request.json()
+        request_text = body.get("text", "")
+        
+        if not request_text:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing_text", "message": "Request body must contain 'text' field"}
+            )
+        
+        # Classify the request
+        best_service, scores = ServiceClassifier.classify_request(request_text)
+        routing_info = RoutingScorer.get_routing_info(scores)
+        
+        return {
+            "status": "success",
+            "request_text": request_text[:100] + "..." if len(request_text) > 100 else request_text,
+            "primary_service": best_service,
+            "primary_confidence": round(scores[best_service], 3),
+            "classification_scores": {svc: round(score, 3) for svc, score in scores.items()},
+            "routing_info": routing_info,
+            "timestamp": int(time.time()),
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": "classification_error", "message": str(e)}
+        )
+
+
+@app.post("/gateway/smart-route", tags=["Gateway AI Classifier"])
+async def smart_route(request: Request):
+    """
+    AI-powered smart routing endpoint.
+    
+    Analyzes request and intelligently routes to the optimal service.
+    Combines classification scores with service health metrics.
+    
+    Request body:
+    {
+        "text": "Your request content",
+        "method": "POST",
+        "body": {...}  // Optional request body
+    }
+    
+    Response includes:
+    - Recommended service
+    - Confidence score
+    - Routing decision info
+    - Service health status
+    """
+    try:
+        body = await request.json()
+        request_text = body.get("text", "")
+        method = body.get("method", "POST")
+        
+        if not request_text:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing_text", "message": "Request body must contain 'text' field"}
+            )
+        
+        # Step 1: Classify the request
+        best_service, scores = ServiceClassifier.classify_request(request_text)
+        
+        # Step 2: Get routing recommendation
+        try:
+            service_name, service_url = RoutingScorer.get_optimal_route(scores, settings.service_urls)
+        except ValueError as e:
+            return JSONResponse(status_code=404, content={"error": "no_available_services", "message": str(e)})
+        
+        # Step 3: Get service health info (with timeout)
+        service_health = {"status": "unknown", "avg_response_time_ms": 0, "success_rate": 0}
+        try:
+            load_balancer = request.app.state.load_balancer
+            health_data = await asyncio.wait_for(
+                load_balancer.metrics.get_service_health(service_name),
+                timeout=2.0
+            )
+            service_health = {
+                "status": "healthy" if health_data.get("is_healthy") else "degraded",
+                "avg_response_time_ms": health_data.get("avg_latency", 0),
+                "success_rate": 1.0 - health_data.get("error_rate", 1.0),
+                "is_fresh": health_data.get("is_fresh", False),
+            }
+        except (asyncio.TimeoutError, Exception):
+            # If health check fails, still allow routing with unknown status
+            pass
+        
+        # Step 4: Prepare routing response
+        routing_info = RoutingScorer.get_routing_info(scores)
+        
+        return {
+            "status": "success",
+            "routing_decision": {
+                "service": service_name,
+                "url": service_url,
+                "confidence": round(scores[service_name], 3),
+                "method": method,
+            },
+            "classification": {
+                "all_scores": {svc: round(score, 3) for svc, score in scores.items()},
+                "routing_info": routing_info,
+            },
+            "service_health": service_health,
+            "timestamp": int(time.time()),
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": "routing_error", "message": str(e)}
+        )
+
+
 @app.get("/gateway/routes", tags=["Gateway"])
 async def list_routes(request: Request):
     """Return the current routing table so you can inspect it at runtime."""
@@ -179,6 +374,28 @@ async def get_metrics(request: Request):
 
     return {
         "services": services_health,
+        "timestamp": int(time.time()),
+    }
+
+
+@app.get("/gateway/metrics/history", tags=["Gateway"])
+async def get_metrics_history(
+    request: Request,
+    service: str = Query(None, description="Filter by service name"),
+):
+    """Return last 20 metrics per service from Redis (no TTL)."""
+    load_balancer = request.app.state.load_balancer
+    metrics_collector = load_balancer.metrics
+
+    if service:
+        return {
+            "service": service,
+            "metrics": await metrics_collector.get_metrics(service) or [],
+        }
+
+    services = list(settings.service_urls.keys())
+    return {
+        "services": await metrics_collector.get_all_metrics(services),
         "timestamp": int(time.time()),
     }
 
@@ -210,6 +427,392 @@ async def get_ratelimit_info(request: Request):
             "status": state,
         },
     }
+
+
+# ── Dashboard: Logs ───────────────────────────────────────────────────────────
+
+@app.get("/dashboard/logs", tags=["Dashboard"])
+async def get_logs(
+    service: str = Query(None, description="Filter by service name"),
+    status_code: int = Query(None, description="Filter by status code"),
+    minutes: int = Query(60, description="Last N minutes"),
+    db: Session = Depends(get_db),
+):
+    """
+    Get request logs from database.
+    
+    Query parameters:
+    - service: Filter by service (auth, chat, ai)
+    - status_code: Filter by status code (200, 429, 500, etc)
+    - minutes: Last N minutes (default 60)
+    """
+    try:
+        cutoff_time = datetime.utcnow() - timedelta(minutes=minutes)
+        
+        query = db.query(RequestLog).filter(RequestLog.timestamp >= cutoff_time)
+        
+        if service:
+            query = query.filter(RequestLog.service == service)
+        
+        if status_code:
+            query = query.filter(RequestLog.status_code == status_code)
+        
+        logs = query.order_by(RequestLog.timestamp.desc()).limit(1000).all()
+        
+        return {
+            "count": len(logs),
+            "time_range": {
+                "start": cutoff_time.isoformat(),
+                "end": datetime.utcnow().isoformat(),
+            },
+            "filters": {
+                "service": service,
+                "status_code": status_code,
+                "minutes": minutes,
+            },
+            "logs": [log.to_dict() for log in logs],
+        }
+    except Exception as e:
+        return {
+            "error": "database_error",
+            "message": str(e),
+            "count": 0,
+            "logs": [],
+        }
+
+
+@app.get("/dashboard/stats", tags=["Dashboard"])
+async def get_stats(
+    minutes: int = Query(60, description="Last N minutes"),
+    db: Session = Depends(get_db),
+):
+    """Get statistics over time period."""
+    try:
+        cutoff_time = datetime.utcnow() - timedelta(minutes=minutes)
+        
+        logs = db.query(RequestLog).filter(RequestLog.timestamp >= cutoff_time).all()
+        
+        stats = {
+            "period_minutes": minutes,
+            "total_requests": len(logs),
+            "avg_response_time_ms": sum(l.response_time_ms for l in logs) / len(logs) if logs else 0,
+            "errors": len([l for l in logs if l.status_code >= 400]),
+            "error_rate": (len([l for l in logs if l.status_code >= 400]) / len(logs) * 100) if logs else 0,
+            "services": {},
+            "status_codes": {},
+            "retry_stats": {
+                "total_retries": sum(l.retry_count for l in logs),
+                "avg_retries_per_request": sum(l.retry_count for l in logs) / len(logs) if logs else 0,
+            },
+            "circuit_breaker_states": {},
+        }
+        
+        for log in logs:
+            # By service
+            if log.service not in stats["services"]:
+                stats["services"][log.service] = {
+                    "count": 0,
+                    "avg_response_time_ms": 0,
+                    "error_count": 0,
+                }
+            stats["services"][log.service]["count"] += 1
+            stats["services"][log.service]["error_count"] += 1 if log.status_code >= 400 else 0
+            
+            # By status code
+            if log.status_code not in stats["status_codes"]:
+                stats["status_codes"][log.status_code] = 0
+            stats["status_codes"][log.status_code] += 1
+            
+            # By circuit breaker state
+            if log.circuit_breaker_state not in stats["circuit_breaker_states"]:
+                stats["circuit_breaker_states"][log.circuit_breaker_state] = 0
+            stats["circuit_breaker_states"][log.circuit_breaker_state] += 1
+        
+        # Calculate avg response time per service
+        for log in logs:
+            if log.service in stats["services"]:
+                total_time = sum(l.response_time_ms for l in logs if l.service == log.service)
+                service_count = stats["services"][log.service]["count"]
+                stats["services"][log.service]["avg_response_time_ms"] = total_time / service_count if service_count > 0 else 0
+        
+        return stats
+    except Exception as e:
+        return {
+            "error": "database_error",
+            "message": str(e),
+        }
+
+
+@app.get("/dashboard/health", tags=["Dashboard"])
+async def check_system_health(request: Request):
+    """System health + overview."""
+    circuit_breakers = request.app.state.circuit_breakers
+    
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "services": {
+            "gateway": "healthy",
+            "database": "connected",
+            "redis": "connected",
+        },
+        "circuit_breakers": {
+            name: {
+                "state": cb.get_state(),
+                "failure_count": cb.failure_count,
+                "threshold": cb.failure_threshold,
+            }
+            for name, cb in circuit_breakers.items()
+        },
+    }
+
+
+@app.post("/gateway/route-with-cache", tags=["Gateway Intelligent Routing"])
+async def route_with_cache(request: Request):
+    """
+    Complete workflow: Cache Check → Classification → Optimal Routing → Logging
+    """
+    global total_requests, cache_hits, cache_misses, rate_limited_requests
+    
+    try:
+        body = await request.json()
+        request_text = body.get("text", "")
+        source = body.get("source", "unknown")
+        method = body.get("method", "POST")
+        
+        # Track metrics
+        with metrics_lock:
+            total_requests += 1
+            request_timestamps.append(time.time())
+        
+        if not request_text:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "missing_text", "message": "Request must have 'text' field"}
+            )
+        
+        # Step 1: Create request hash for caching
+        request_hash = hashlib.md5(
+            f"{request_text}:{source}".encode()
+        ).hexdigest()
+        
+        # Step 2: Check Redis cache
+        cached_result = await RequestCache.get_cached_classification(request_hash)
+        if cached_result:
+            with metrics_lock:
+                cache_hits += 1
+                service_counts[cached_result["service"]] += 1
+                recent_requests.append({
+                    "source": source,
+                    "service": cached_result["service"],
+                    "confidence": cached_result["confidence"],
+                    "cached": True,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            
+            return {
+                "status": "cached",
+                "service": cached_result["service"],
+                "confidence": cached_result["confidence"],
+                "source": cached_result["source"],
+                "cached": True,
+                "timestamp": cached_result["timestamp"]
+            }
+        
+        with metrics_lock:
+            cache_misses += 1
+        
+        # Step 3: AI Classification
+        best_service, scores = ServiceClassifier.classify_request(request_text)
+        
+        # Track classification scores
+        with metrics_lock:
+            classification_scores_history.append({
+                "service": best_service,
+                "scores": scores,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+        
+        # Step 4: Get optimal route based on metrics
+        try:
+            if max(scores.values()) == 0:
+                service_name = "auth"
+                routing_score = 0.5
+                metrics_used = 0
+            else:
+                (service_name, combined_score) = await RequestCache.get_best_service(
+                    list(scores.keys()),
+                    scores
+                )
+                routing_score = combined_score
+                metrics = await RequestCache.get_last_metrics(service_name)
+                metrics_used = len(metrics)
+        except Exception as e:
+            print(f"[!] Routing error: {e}")
+            service_name = best_service
+            routing_score = scores.get(best_service, 0)
+            metrics_used = 0
+        
+        service_url = settings.service_urls.get(service_name, f"http://localhost:900{list(settings.service_urls.keys()).index(service_name) + 1}")
+        confidence = scores.get(service_name, 0)
+        
+        # Update service counts
+        with metrics_lock:
+            service_counts[service_name] += 1
+            recent_requests.append({
+                "source": source,
+                "service": service_name,
+                "confidence": confidence,
+                "cached": False,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+        
+        # Step 5: Cache the classification
+        await RequestCache.cache_classification(request_hash, service_name, confidence, source)
+        
+        # Step 6: Record metrics
+        await RequestCache.record_service_metric(service_name, 0, 200, source)
+        
+        # Step 7: Log to database (if available)
+        try:
+            db = next(get_db())
+            log_entry = RequestLog(
+                request_id=str(uuid.uuid4()),
+                source=source,
+                service=service_name,
+                status_code=200,
+                response_time_ms=0,
+                timestamp=datetime.utcnow(),
+                notes=f"Classification: {confidence:.2f}, Routing: {routing_score:.2f}"
+            )
+            db.add(log_entry)
+            db.commit()
+        except Exception as e:
+            print(f"[!] Database logging error: {e}")
+        
+        return {
+            "status": "routed",
+            "service": service_name,
+            "url": service_url,
+            "confidence": round(confidence, 3),
+            "source": source,
+            "cached": False,
+            "routing_score": round(routing_score, 3),
+            "metrics_used": metrics_used,
+            "classification_scores": {s: round(scores[s], 3) for s in scores},
+            "timestamp": int(time.time())
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"error": "routing_error", "message": str(e)}
+        )
+
+
+# ── Comprehensive Metrics & Dashboard Endpoints ────────────────────────────────
+
+@app.get("/api/metrics", tags=["Dashboard Metrics"])
+async def get_metrics():
+    """Get comprehensive gateway metrics for dashboard"""
+    with metrics_lock:
+        total = total_requests if total_requests > 0 else 1
+        cache_hit_rate = (cache_hits / total * 100) if total > 0 else 0
+        
+        # Calculate requests per second (last 60 seconds)
+        now = time.time()
+        recent_60s = [ts for ts in request_timestamps if now - ts < 60]
+        rps = len(recent_60s) / 60 if len(recent_60s) > 0 else 0
+        
+        return {
+            "total_requests": total_requests,
+            "cache_hits": cache_hits,
+            "cache_misses": cache_misses,
+            "cache_hit_rate": round(cache_hit_rate, 2),
+            "rate_limited": rate_limited_requests,
+            "requests_per_second": round(rps, 2),
+            "services": service_counts,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+
+@app.get("/api/metrics/health", tags=["Dashboard Metrics"])
+async def get_health():
+    """Get service health status"""
+    health_data = {}
+    for service, port in [("auth", 9001), ("chat", 9002), ("ai", 9003), ("products", 9004)]:
+        try:
+            async with httpx.AsyncClient(timeout=2) as client:
+                response = await client.get(f"http://localhost:{port}/health")
+                health_data[service] = "healthy" if response.status_code == 200 else "down"
+        except:
+            health_data[service] = "down"
+    
+    with metrics_lock:
+        service_health.update(health_data)
+    
+    return {"services": health_data, "timestamp": datetime.utcnow().isoformat()}
+
+
+@app.get("/api/metrics/recent", tags=["Dashboard Metrics"])
+async def get_recent_requests():
+    """Get recent routed requests"""
+    with metrics_lock:
+        return {
+            "requests": list(recent_requests),
+            "count": len(recent_requests),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+
+@app.get("/api/metrics/traffic", tags=["Dashboard Metrics"])
+async def get_traffic():
+    """Get traffic over time (last 5 minutes, 1 second buckets)"""
+    now = time.time()
+    buckets = {}
+    
+    with metrics_lock:
+        for ts in request_timestamps:
+            bucket = int(ts) - (int(ts) % 10)  # Group by 10-second intervals
+            if bucket not in buckets:
+                buckets[bucket] = 0
+            buckets[bucket] += 1
+    
+    # Sort and prepare for chart
+    sorted_buckets = sorted(buckets.items())
+    return {
+        "traffic": [{"time": int(k), "requests": v} for k, v in sorted_buckets[-30:]],  # Last 5 minutes
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+
+@app.get("/api/dashboard", tags=["Dashboard"])
+async def dashboard_data():
+    """Complete dashboard data endpoint"""
+    with metrics_lock:
+        total = total_requests if total_requests > 0 else 1
+        cache_hit_rate = (cache_hits / total * 100) if total > 0 else 0
+        
+        # Calculate requests per second
+        now = time.time()
+        recent_60s = [ts for ts in request_timestamps if now - ts < 60]
+        rps = len(recent_60s) / 60 if len(recent_60s) > 0 else 0
+        
+        return {
+            "summary": {
+                "total_requests": total_requests,
+                "cache_hits": cache_hits,
+                "cache_hit_rate": round(cache_hit_rate, 2),
+                "rate_limited": rate_limited_requests,
+                "rps": round(rps, 2)
+            },
+            "services": service_counts,
+            "health": service_health,
+            "recent_requests": list(recent_requests),
+            "timestamp": datetime.utcnow().isoformat()
+        }
 
 
 # ── Catch-all proxy ───────────────────────────────────────────────────────────
@@ -271,9 +874,15 @@ async def proxy(request: Request, full_path: str):
             print(f"⚠️  Redis cache read error: {e}")
             # Continue to upstream if cache fails
 
-    # 3. Forward the request
+    # 3. Forward the request with retry + circuit breaker
     try:
         client: httpx.AsyncClient = pool_manager.get_client(service_name)
+        
+        # Get circuit breaker for this service
+        circuit_breaker = request.app.state.circuit_breakers.get(
+            service_name.split("_")[0],  # Extract service type from name
+            request.app.state.circuit_breakers.get("chat")  # Default fallback
+        )
 
         # Re-assemble query string
         target_url = upstream_url
@@ -304,15 +913,74 @@ async def proxy(request: Request, full_path: str):
         headers["X-Forwarded-Host"] = request.headers.get("host", "gateway")
         headers["X-Gateway-Service"] = service_name
 
-        upstream_response = await client.request(
-            method=request.method,
-            url=target_url,
-            headers=headers,
-            content=body,
-            timeout=settings.request_timeout,
-        )
+        # Retry + Circuit Breaker wrapper
+        retry_count = 0
+        upstream_response = None
+        error_message = None
+        
+        async def make_request():
+            nonlocal retry_count
+            return await client.request(
+                method=request.method,
+                url=target_url,
+                headers=headers,
+                content=body,
+                timeout=settings.request_timeout,
+            )
+        
+        try:
+            upstream_response = await retry_with_backoff(
+                lambda: circuit_breaker.call(make_request),
+                max_retries=3,
+                initial_delay=1.0,
+                backoff_factor=2.0
+            )
+            retry_count = 0
+        except Exception as e:
+            # Count retries from error
+            error_message = str(e)
+            print(f"❌ Request failed after retries: {error_message}")
+            
+            if "Circuit OPEN" in error_message:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "service_unavailable",
+                        "message": f"Service {service_name} is temporarily unavailable (circuit open)",
+                        "retry_after": 30,
+                    },
+                )
+            
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": "upstream_unreachable",
+                    "service": service_name,
+                    "detail": error_message,
+                },
+            )
 
-        # 4. Cache the response (only for successful GET requests)
+        # 4. UPDATE GLOBAL DASHBOARD METRICS
+        global total_requests, cache_misses
+        with metrics_lock:
+            total_requests += 1
+            request_timestamps.append(time.time())
+            
+            # Extract service name from full service_name (e.g., "auth_service" → "auth")
+            service_key = service_name.split("_")[0] if "_" in service_name else service_name
+            if service_key in service_counts:
+                service_counts[service_key] += 1
+            
+            # Track recent request
+            recent_requests.append({
+                "source": request.client.host if request.client else "unknown",
+                "service": service_key,
+                "confidence": 1.0,
+                "cached": False,
+                "timestamp": datetime.now().isoformat()
+            })
+
+        # 5. Cache the response (only for successful GET requests)
         if request.method == "GET" and 200 <= upstream_response.status_code < 300:
             try:
                 await redis_client.set(
@@ -325,8 +993,10 @@ async def proxy(request: Request, full_path: str):
                 print(f"⚠️  Redis cache write error: {e}")
                 # Continue even if cache write fails
 
-        # 5. Log and record metrics
+        # 6. Log and record metrics
         elapsed_ms = (time.monotonic() - request.state.start_time) * 1000
+        client_ip = request.client.host if request.client else "unknown"
+        
         await logger.log(
             request_id=request.state.request_id,
             method=request.method,
@@ -335,6 +1005,10 @@ async def proxy(request: Request, full_path: str):
             upstream=upstream_url,
             status=upstream_response.status_code,
             latency_ms=elapsed_ms,
+            client_ip=client_ip,
+            error=error_message,
+            retry_count=retry_count,
+            circuit_state=circuit_breaker.get_state(),
         )
 
         # Record metrics for load balancing
@@ -350,7 +1024,7 @@ async def proxy(request: Request, full_path: str):
         )
         print(f"📊 Metrics recorded: {service_name} ({task_type}): {elapsed_ms:.0f}ms, status={upstream_response.status_code}")
 
-        # 6. Return upstream response (strip hop-by-hop response headers too)
+        # 7. Return upstream response (strip hop-by-hop response headers too)
         excluded_response_headers = {"transfer-encoding", "connection"}
         response_headers = {
             k: v

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import redis.asyncio as redis
 from redis.asyncio.connection import ConnectionPool
 
@@ -24,8 +25,9 @@ def _get_redis_client_for_loop():
     
     if loop_id and loop_id not in _clients:
         # Create new pool and client for this loop
+        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
         pool = ConnectionPool.from_url(
-            "redis://localhost:6379/0",
+            redis_url,
             decode_responses=True,
             max_connections=10
         )

@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart API Gateway Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 30px;
+            border-radius: 15px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.15);
+            backdrop-filter: blur(10px);
+        }
+
+        h1 {
+            color: #667eea;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 15px;
+            height: 15px;
+            background: #10b981;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 1.1em;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .metric-card {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+
+        .metric-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 50px rgba(0, 0, 0, 0.2);
+        }
+
+        .metric-label {
+            color: #999;
+            font-size: 0.95em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+
+        .metric-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .metric-unit {
+            color: #999;
+            font-size: 0.9em;
+            margin-left: 5px;
+        }
+
+        .cache-bar {
+            margin-top: 15px;
+            background: #e5e7eb;
+            height: 10px;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+
+        .cache-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            border-radius: 10px;
+            transition: width 0.5s ease;
+        }
+
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .chart-container {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 25px;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        .chart-title {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 20px;
+        }
+
+        .services-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .service-card {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 20px;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            border-left: 5px solid #667eea;
+            transition: all 0.3s;
+        }
+
+        .service-card.healthy {
+            border-left-color: #10b981;
+        }
+
+        .service-card.down {
+            border-left-color: #ef4444;
+            opacity: 0.7;
+        }
+
+        .service-name {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .service-count {
+            font-size: 2em;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .service-status {
+            margin-top: 10px;
+            font-size: 0.95em;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #10b981;
+        }
+
+        .status-dot.down {
+            background: #ef4444;
+        }
+
+        .recent-table {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            overflow: hidden;
+        }
+
+        .table-header {
+            padding: 25px;
+            border-bottom: 2px solid #e5e7eb;
+        }
+
+        .table-title {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #333;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        thead {
+            background: #f9fafb;
+        }
+
+        th {
+            padding: 15px 25px;
+            text-align: left;
+            color: #666;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.9em;
+            letter-spacing: 1px;
+            border-bottom: 2px solid #e5e7eb;
+        }
+
+        td {
+            padding: 15px 25px;
+            border-bottom: 1px solid #e5e7eb;
+            color: #333;
+        }
+
+        tr:hover {
+            background: #f9fafb;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+
+        .badge-auth {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .badge-chat {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .badge-ai {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge-products {
+            background: #f3e8ff;
+            color: #6b21a8;
+        }
+
+        .badge-cached {
+            background: #e0e7ff;
+            color: #3730a3;
+            margin-left: 8px;
+        }
+
+        .confidence {
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .footer {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.8);
+            margin-top: 30px;
+            font-size: 0.95em;
+        }
+
+        .last-update {
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 0.9em;
+        }
+
+        @media (max-width: 768px) {
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .metrics-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            h1 {
+                font-size: 1.8em;
+            }
+
+            table {
+                font-size: 0.9em;
+            }
+
+            td, th {
+                padding: 10px 15px;
+            }
+        }
+
+        .loading {
+            text-align: center;
+            color: #999;
+            padding: 40px;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 40px;
+            height: 40px;
+            border: 4px solid #e5e7eb;
+            border-top-color: #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .request-form-container {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            margin-bottom: 30px;
+        }
+
+        .form-title {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .form-group {
+            display: flex;
+            gap: 15px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+        }
+
+        .form-field {
+            flex: 1;
+            min-width: 200px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .form-field label {
+            font-size: 0.95em;
+            font-weight: 600;
+            color: #666;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .form-field input {
+            padding: 12px 15px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            font-size: 1em;
+            transition: all 0.3s;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .form-field input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .send-btn {
+            padding: 12px 35px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            white-space: nowrap;
+        }
+
+        .send-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .send-btn:active {
+            transform: translateY(0);
+        }
+
+        .send-btn.loading {
+            opacity: 0.7;
+            cursor: not-allowed;
+        }
+
+        .send-btn.loading::after {
+            content: '';
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        .form-feedback {
+            margin-top: 15px;
+            padding: 12px 15px;
+            border-radius: 8px;
+            font-size: 0.95em;
+            display: none;
+        }
+
+        .form-feedback.success {
+            background: #dcfce7;
+            color: #166534;
+            border-left: 4px solid #10b981;
+            display: block;
+        }
+
+        .form-feedback.error {
+            background: #fee2e2;
+            color: #991b1b;
+            border-left: 4px solid #ef4444;
+            display: block;
+        }
+
+        @media (max-width: 768px) {
+            .form-group {
+                flex-direction: column;
+            }
+
+            .form-field {
+                min-width: 100%;
+            }
+
+            .send-btn {
+                width: 100%;
+                justify-content: center;
+            }
+
+            .request-form-container {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <h1>
+                <span class="status-indicator"></span>
+                Smart API Gateway Dashboard
+            </h1>
+            <p class="subtitle">Real-time monitoring & analytics for intelligent request routing</p>
+            <p class="last-update">Last update: <span id="lastUpdate">--:--:--</span></p>
+        </header>
+
+        <!-- Key Metrics -->
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <div class="metric-label">Total Requests</div>
+                <div class="metric-value" id="totalRequests">0</div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-label">Requests/Second</div>
+                <div class="metric-value" id="rps">0<span class="metric-unit">req/s</span></div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-label">Cache Hit Rate</div>
+                <div class="metric-value" id="cacheRate">0<span class="metric-unit">%</span></div>
+                <div class="cache-bar">
+                    <div class="cache-fill" id="cacheBar" style="width: 0%;"></div>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <div class="metric-label">Rate Limited</div>
+                <div class="metric-value" id="rateLimited">0</div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="charts-grid">
+            <div class="chart-container">
+                <div class="chart-title">📊 Request Traffic (Last 5 min)</div>
+                <canvas id="trafficChart"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <div class="chart-title">🎯 Service Distribution</div>
+                <canvas id="routingChart"></canvas>
+            </div>
+        </div>
+
+        <!-- Request Form -->
+        <div class="request-form-container">
+            <div class="form-title">
+                📤 Send Test Request to Gateway
+            </div>
+            <form id="requestForm" onsubmit="sendRequest(event)">
+                <div class="form-group">
+                    <div class="form-field" style="flex: 2;">
+                        <label for="promptInput">Prompt</label>
+                        <input 
+                            type="text" 
+                            id="promptInput" 
+                            placeholder="Enter your prompt (e.g., 'Explain AI')" 
+                            required
+                        >
+                    </div>
+                    <div class="form-field">
+                        <label for="sourceInput">Source (Optional)</label>
+                        <input 
+                            type="text" 
+                            id="sourceInput" 
+                            placeholder="e.g., web_client" 
+                            value="web_dashboard"
+                        >
+                    </div>
+                    <button type="submit" class="send-btn" id="sendBtn">
+                        ✈️ Send Request
+                    </button>
+                </div>
+                <div class="form-feedback" id="formFeedback"></div>
+            </form>
+        </div>
+
+        <!-- Service Health -->
+        <div class="services-grid">
+            <div class="service-card healthy" id="authCard">
+                <div class="service-name">🔐 AUTH Service</div>
+                <div class="service-count" id="authCount">0</div>
+                <div class="service-status">
+                    <span class="status-dot"></span>
+                    <span id="authStatus">Healthy</span>
+                </div>
+            </div>
+
+            <div class="service-card healthy" id="chatCard">
+                <div class="service-name">💬 CHAT Service</div>
+                <div class="service-count" id="chatCount">0</div>
+                <div class="service-status">
+                    <span class="status-dot"></span>
+                    <span id="chatStatus">Healthy</span>
+                </div>
+            </div>
+
+            <div class="service-card healthy" id="aiCard">
+                <div class="service-name">🤖 AI Service</div>
+                <div class="service-count" id="aiCount">0</div>
+                <div class="service-status">
+                    <span class="status-dot"></span>
+                    <span id="aiStatus">Healthy</span>
+                </div>
+            </div>
+
+            <div class="service-card healthy" id="productsCard">
+                <div class="service-name">🛍️ PRODUCTS Service</div>
+                <div class="service-count" id="productsCount">0</div>
+                <div class="service-status">
+                    <span class="status-dot"></span>
+                    <span id="productsStatus">Healthy</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Requests -->
+        <div class="recent-table">
+            <div class="table-header">
+                <div class="table-title">📋 Recent Requests</div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Source</th>
+                        <th>Service</th>
+                        <th>Confidence</th>
+                        <th>Status</th>
+                        <th>Time</th>
+                    </tr>
+                </thead>
+                <tbody id="requestsTableBody">
+                    <tr>
+                        <td colspan="5" style="text-align: center; padding: 40px; color: #999;">
+                            <div class="spinner"></div>
+                            <p>Loading requests...</p>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>🚀 Smart API Gateway Dashboard | Powered by FastAPI + Redis + Gemini AI</p>
+            <p class="last-update">Refreshing every 2 seconds...</p>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let trafficChart = null;
+        let routingChart = null;
+        const API_BASE = 'http://localhost:8000';
+
+        // Send request function
+        async function sendRequest(event) {
+            event.preventDefault();
+
+            const promptInput = document.getElementById('promptInput');
+            const sourceInput = document.getElementById('sourceInput');
+            const sendBtn = document.getElementById('sendBtn');
+            const feedback = document.getElementById('formFeedback');
+
+            const prompt = promptInput.value.trim();
+            const source = sourceInput.value.trim() || 'web_dashboard';
+
+            if (!prompt) {
+                showFeedback('Please enter a prompt', 'error');
+                return;
+            }
+
+            // Disable button during request
+            sendBtn.disabled = true;
+            sendBtn.classList.add('loading');
+
+            try {
+                // Determine which service to route to based on prompt keywords
+                let serviceUrl = `${API_BASE}/ai/chat`;
+                let requestBody = { prompt };
+
+                if (prompt.toLowerCase().includes('login') || prompt.toLowerCase().includes('auth')) {
+                    // Special handling for auth login
+                    serviceUrl = `${API_BASE}/auth/login`;
+                    requestBody = { username: "admin", password: "secret" };
+                    showFeedback('📝 Sending auth login request with demo credentials (admin/secret)...', 'success');
+                } else if (prompt.toLowerCase().includes('chat') || prompt.toLowerCase().includes('message')) {
+                    serviceUrl = `${API_BASE}/chat/message`;
+                    requestBody = { message: prompt };
+                } else if (prompt.toLowerCase().includes('product')) {
+                    serviceUrl = `${API_BASE}/products/list`;
+                    requestBody = { query: prompt };
+                }
+
+                const response = await fetch(serviceUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Source': source
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (response.ok) {
+                    showFeedback(`✅ Request sent successfully! (${response.status})`, 'success');
+                    promptInput.value = '';
+                    
+                    // Refresh dashboard immediately to show new request
+                    setTimeout(fetchDashboardData, 500);
+                } else {
+                    showFeedback(`❌ Request failed (${response.status})`, 'error');
+                }
+            } catch (error) {
+                showFeedback(`❌ Error: ${error.message}`, 'error');
+                console.error('Request error:', error);
+            } finally {
+                sendBtn.disabled = false;
+                sendBtn.classList.remove('loading');
+            }
+        }
+
+        // Show feedback message
+        function showFeedback(message, type) {
+            const feedback = document.getElementById('formFeedback');
+            feedback.textContent = message;
+            feedback.className = 'form-feedback ' + type;
+            
+            // Auto-hide after 4 seconds
+            setTimeout(() => {
+                feedback.className = 'form-feedback';
+            }, 4000);
+        }
+
+        // Fetch dashboard data
+        async function fetchDashboardData() {
+            try {
+                const response = await fetch(`${API_BASE}/api/dashboard`);
+                const data = await response.json();
+                updateMetrics(data);
+                updateServiceCards(data);
+                updateRecentRequests(data);
+                updateCharts(data);
+                updateLastUpdate();
+            } catch (error) {
+                console.error('Error fetching dashboard data:', error);
+            }
+        }
+
+        // Update metrics cards
+        function updateMetrics(data) {
+            const { summary } = data;
+            document.getElementById('totalRequests').textContent = summary.total_requests.toLocaleString();
+            document.getElementById('rps').textContent = summary.rps + ' ';
+            document.getElementById('cacheRate').textContent = summary.cache_hit_rate + ' ';
+            document.getElementById('rateLimited').textContent = summary.rate_limited;
+            
+            // Update cache bar
+            document.getElementById('cacheBar').style.width = Math.min(summary.cache_hit_rate, 100) + '%';
+        }
+
+        // Update service cards
+        function updateServiceCards(data) {
+            const services = ['auth', 'chat', 'ai', 'products'];
+            
+            services.forEach(service => {
+                const count = data.services[service] || 0;
+                const health = data.health[service] || 'down';
+                const card = document.getElementById(service + 'Card');
+                const countEl = document.getElementById(service + 'Count');
+                const statusEl = document.getElementById(service + 'Status');
+                const dot = card.querySelector('.status-dot');
+
+                countEl.textContent = count;
+                statusEl.textContent = health === 'healthy' ? '✓ Healthy' : '✗ Down';
+                
+                if (health === 'healthy') {
+                    card.classList.remove('down');
+                    card.classList.add('healthy');
+                    dot.classList.remove('down');
+                } else {
+                    card.classList.remove('healthy');
+                    card.classList.add('down');
+                    dot.classList.add('down');
+                }
+            });
+        }
+
+        // Update recent requests table
+        function updateRecentRequests(data) {
+            const tbody = document.getElementById('requestsTableBody');
+            if (!data.recent_requests || data.recent_requests.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #999; padding: 20px;">No requests yet</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = data.recent_requests.map(req => {
+                const time = new Date(req.timestamp);
+                const timeStr = time.toLocaleTimeString();
+                const confidence = (req.confidence * 100).toFixed(1);
+                const cached = req.cached ? '<span class="badge badge-cached">CACHED</span>' : '';
+                
+                const serviceBadgeClass = {
+                    'auth': 'badge-auth',
+                    'chat': 'badge-chat',
+                    'ai': 'badge-ai',
+                    'products': 'badge-products'
+                }[req.service] || 'badge-auth';
+
+                return `
+                    <tr>
+                        <td><strong>${req.source}</strong></td>
+                        <td><span class="badge ${serviceBadgeClass}">${req.service.toUpperCase()}</span></td>
+                        <td><span class="confidence">${confidence}%</span></td>
+                        <td>${cached}</td>
+                        <td>${timeStr}</td>
+                    </tr>
+                `;
+            }).reverse().slice(0, 10).join('');
+        }
+
+        // Update charts
+        function updateCharts(data) {
+            updateTrafficChart(data);
+            updateRoutingChart(data);
+        }
+
+        // Traffic chart
+        function updateTrafficChart(data) {
+            const ctx = document.getElementById('trafficChart').getContext('2d');
+            
+            // Prepare data - group by 10-second buckets
+            const now = Math.floor(Date.now() / 1000);
+            const labels = [];
+            const chartData = [];
+            
+            for (let i = 30; i >= 0; i--) {
+                const time = now - (i * 10);
+                const minutes = Math.floor((30 - i) / 6);
+                const seconds = ((30 - i) % 6) * 10;
+                labels.push(`${minutes}m${seconds}s`);
+                chartData.push(Math.random() * 100 + 50); // Simulated data
+            }
+
+            if (trafficChart) {
+                trafficChart.destroy();
+            }
+
+            trafficChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Requests',
+                        data: chartData,
+                        borderColor: '#667eea',
+                        backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 0,
+                        pointHoverRadius: 8,
+                        pointBackgroundColor: '#667eea'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.05)'
+                            }
+                        },
+                        x: {
+                            grid: {
+                                display: false
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Routing chart
+        function updateRoutingChart(data) {
+            const ctx = document.getElementById('routingChart').getContext('2d');
+            const services = data.services || {};
+            
+            const labels = Object.keys(services).map(s => s.toUpperCase());
+            const chartData = Object.values(services);
+            const colors = ['#667eea', '#764ba2', '#f093fb', '#4facfe'];
+
+            if (routingChart) {
+                routingChart.destroy();
+            }
+
+            routingChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: chartData,
+                        backgroundColor: colors,
+                        borderColor: '#fff',
+                        borderWidth: 3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: {
+                                padding: 20,
+                                font: {
+                                    size: 12,
+                                    weight: 'bold'
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Update last update time
+        function updateLastUpdate() {
+            const now = new Date();
+            document.getElementById('lastUpdate').textContent = now.toLocaleTimeString();
+        }
+
+        // Initial load and refresh every 2 seconds
+        fetchDashboardData();
+        setInterval(fetchDashboardData, 2000);
+    </script>
+</body>
+</html>

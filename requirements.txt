@@ -11,6 +11,15 @@ pytest-asyncio==0.24.0
 # Rate limiting & distributed state
 redis==5.2.1
 
+# Environment variables
+python-dotenv==1.0.1
+
+# Database & ORM (Phase 3 & beyond)
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+
+# AI Integration - Gemini API
+google-generativeai==0.8.3
+
 # Future phases (install when ready)
 # asyncpg==0.30.0
-# openai==1.57.4

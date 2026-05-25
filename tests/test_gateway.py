@@ -236,7 +236,7 @@ async def test_sliding_window_denies_requests_over_limit(redis_cleanup):
 
 
 @pytest.mark.asyncio
-async def test_rate_limiter_manager_token_bucket():
+async def test_rate_limiter_manager_token_bucket(redis_cleanup):
     """Rate limiter manager should use token bucket algorithm."""
     from gateway.rate_limiter import RateLimiterManager
     
@@ -259,7 +259,7 @@ async def test_rate_limiter_manager_token_bucket():
 
 
 @pytest.mark.asyncio
-async def test_rate_limiter_manager_sliding_window():
+async def test_rate_limiter_manager_sliding_window(redis_cleanup):
     """Rate limiter manager should use sliding window algorithm."""
     from gateway.rate_limiter import RateLimiterManager
     
